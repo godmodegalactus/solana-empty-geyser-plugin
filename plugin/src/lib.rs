@@ -1,12 +1,12 @@
-use std::{net::{IpAddr, Ipv4Addr, UdpSocket}, sync::Arc};
+use std::{net::{IpAddr, Ipv4Addr, UdpSocket}, sync::Arc, str::FromStr};
 
 use pem::Pem;
 use quinn::{ServerConfig, IdleTimeout, Endpoint, TokioRuntime, EndpointConfig};
 use serde::{Serialize, Deserialize};
 use solana_geyser_plugin_interface::geyser_plugin_interface::{GeyserPlugin, Result as PluginResult, GeyserPluginError};
-use solana_sdk::{signature::{Signature, Keypair}, transaction::TransactionError, slot_history::Slot, quic::QUIC_MAX_TIMEOUT, packet::PACKET_DATA_SIZE};
-use solana_streamer::{tls_certificates::new_self_signed_tls_certificate, quic::QuicServerError};
-use tokio::{runtime::Runtime, task::JoinHandle, sync::mpsc::{UnboundedSender, UnboundedReceiver}};
+use solana_sdk::{signature::{Signature, Keypair}, transaction::{TransactionError, SanitizedTransaction}, slot_history::Slot, quic::QUIC_MAX_TIMEOUT, packet::PACKET_DATA_SIZE, pubkey::Pubkey};
+use solana_streamer::{tls_certificates::{new_self_signed_tls_certificate, get_pubkey_from_tls_certificate}, quic::QuicServerError};
+use tokio::{runtime::Runtime, task::JoinHandle, sync::mpsc::UnboundedSender};
 
 use crate::skip_client_verification::SkipClientVerification;
 
@@ -46,12 +46,14 @@ impl GeyserPlugin for Plugin {
     #[allow(unused_variables)]
     fn notify_banking_stage_transaction_results(
         &self,
-        transaction: Signature,
+        transaction: &SanitizedTransaction,
         error: Option<TransactionError>,
         slot: Slot,
     ) -> PluginResult<()> {
-        if let Some(inner) = self.inner {
-            inner.sender.send(TransactionResults { signature: transaction, error, slot });
+        if let Some(inner) = &self.inner {
+            if let Err(e) = inner.sender.send(TransactionResults { signature: transaction.signature().clone(), error, slot }) {
+                log::error!("error sending on the channel {}", e);
+            }
             Ok(())
         } else {
             Ok(())
@@ -68,6 +70,8 @@ impl GeyserPlugin for Plugin {
         .map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let (sender, reciever) = tokio::sync::mpsc::unbounded_channel::<TransactionResults>();
 
+        let allowed_connection = Pubkey::from_str("G8pLuvzarejjLuuPNVNR1gk9xiFKmAcs9J5LL3GZGM6F").unwrap();
+
         let handle = tokio::spawn(async move {
             let mut reciever = reciever;
             loop {
@@ -81,6 +85,15 @@ impl GeyserPlugin for Plugin {
                             continue;
                         }
                     };
+                    let connection_identity = get_remote_pubkey(&connection);
+                    if let Some(connection_identity) = connection_identity {
+                        if !allowed_connection.eq(&connection_identity) {
+                            // not an authorized connection
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
                     let (mut send_stream, _) = match connection.accept_bi().await {
                         Ok(res) => res,
                         Err(e) => {
@@ -92,7 +105,9 @@ impl GeyserPlugin for Plugin {
                     while let Some(msg) = reciever.recv().await {
                         let bytes = bincode::serialize(&msg).unwrap_or(vec![]);
                         if !bytes.is_empty() {
-                            let _ = send_stream.write_all(&bytes).await;
+                            if let Err(e) = send_stream.write_all(&bytes).await {
+                                log::error!("error writing on stream channel {}", e);
+                            }
                         }
                     }
                 }
@@ -144,4 +159,15 @@ pub(crate) fn configure_server(
     config.datagram_receive_buffer_size(None);
 
     Ok((server_config, cert_chain_pem))
+}
+
+pub fn get_remote_pubkey(connection: &quinn::Connection) -> Option<Pubkey> {
+    // Use the client cert only if it is self signed and the chain length is 1.
+    connection
+        .peer_identity()?
+        .downcast::<Vec<rustls::Certificate>>()
+        .ok()
+        .filter(|certs| certs.len() == 1)?
+        .first()
+        .and_then(get_pubkey_from_tls_certificate)
 }

@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "plugin"
+]
+
+[profile.release]
+debug = true
+lto = true
+codegen-units = 1

@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "plugin"
+    "plugin",
+    "client"
 ]
 
 [profile.release]

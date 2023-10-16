@@ -10,8 +10,7 @@ use tokio::{runtime::Runtime, task::JoinHandle, sync::mpsc::UnboundedSender};
 
 use crate::skip_client_verification::SkipClientVerification;
 
-mod skip_client_verification;
-mod plugin_error;
+pub mod skip_client_verification;
 
 pub const ALPN_GEYSER_PROTOCOL_ID: &[u8] = b"solana-geyser";
 

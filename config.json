@@ -1,0 +1,6 @@
+{
+    "libpath": "../target/debug/libgeyser_quic_plugin.so",
+    "quic_plugin": {
+        "address": "0.0.0.0:11000"
+    }
+}

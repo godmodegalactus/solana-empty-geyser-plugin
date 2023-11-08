@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::config::Config;
 use itertools::Itertools;
 use pem::Pem;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime};
@@ -28,6 +29,7 @@ use tokio::{runtime::Runtime, sync::mpsc::UnboundedSender, task::JoinHandle};
 use crate::skip_client_verification::SkipClientVerification;
 
 pub mod skip_client_verification;
+pub mod config;
 
 pub const ALPN_GEYSER_PROTOCOL_ID: &[u8] = b"solana-geyser";
 
@@ -132,13 +134,14 @@ impl GeyserPlugin for Plugin {
 
     fn on_load(
         &mut self,
-        _config_file: &str,
+        config_file: &str,
     ) -> solana_geyser_plugin_interface::geyser_plugin_interface::Result<()> {
+        let plugin_config = Config::load_from_file(config_file)?;
         let runtime = Runtime::new().map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let res = configure_server(&Keypair::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
 
         let (config, _) = res.map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
-        let sock = UdpSocket::bind("127.0.0.1:18990").expect("couldn't bind to address");
+        let sock = UdpSocket::bind(plugin_config.quic_plugin.address).expect("couldn't bind to address");
         let endpoint = Endpoint::new(EndpointConfig::default(), Some(config), sock, TokioRuntime)
             .map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let (sender, reciever) = tokio::sync::mpsc::unbounded_channel::<TransactionResults>();

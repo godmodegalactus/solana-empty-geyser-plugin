@@ -14,9 +14,9 @@ name = "config-check"
 
 [dependencies]
 tokio = { version = "1.21.2", features = ["rt-multi-thread", "macros", "time", "fs"] }
-solana-sdk = {  git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_result_plugin" }
-solana-geyser-plugin-interface = {  git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_result_plugin" }
-solana-streamer = {  git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_result_plugin" }
+solana-sdk = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
+solana-geyser-plugin-interface = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
+solana-streamer = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
 itertools = "0.10.5"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
@@ -46,3 +46,9 @@ rustls = { version = "=0.20.8", default-features = false }
 rcgen = "0.10.0"
 pkcs8 = "0.8.0"
 pem = "1.1.1"
+
+[build-dependencies]
+anyhow = "1.0.62"
+cargo-lock = "9.0.0"
+git-version = "0.3.5"
+vergen = { version = "8.2.1", features = ["build", "rustc"] }

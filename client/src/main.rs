@@ -2,15 +2,56 @@ use std::{time::Duration, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::Arc};
 
 use cli::Args;
 use geyser_quic_plugin::{TransactionResults, ALPN_GEYSER_PROTOCOL_ID};
+use pkcs8::{AlgorithmIdentifier, ObjectIdentifier, der::Document};
 use quinn::{TokioRuntime, EndpointConfig, Endpoint, ClientConfig, TransportConfig, IdleTimeout};
-use solana_quic_client::nonblocking::quic_client:: SkipServerVerification;
+use rcgen::{RcgenError, CertificateParams, SanType, DistinguishedName, DnType};
+use skip_server_verification::SkipServerVerification;
 use solana_sdk::signature::Keypair;
 use clap::Parser;
-use solana_streamer::tls_certificates::new_self_signed_tls_certificate;
 
 mod cli;
+mod skip_server_verification;
 
 pub const PACKET_DATA_SIZE: usize = 1280 - 40 - 8;
+
+pub fn new_self_signed_tls_certificate(
+    keypair: &Keypair,
+    san: IpAddr,
+) -> Result<(rustls::Certificate, rustls::PrivateKey), RcgenError> {
+    const ED25519_IDENTIFIER: [u32; 4] = [1, 3, 101, 112];
+    let mut private_key = Vec::<u8>::with_capacity(34);
+    private_key.extend_from_slice(&[0x04, 0x20]); // ASN.1 OCTET STRING
+    private_key.extend_from_slice(keypair.secret().as_bytes());
+    let key_pkcs8 = pkcs8::PrivateKeyInfo {
+        algorithm: AlgorithmIdentifier {
+            oid: ObjectIdentifier::from_arcs(&ED25519_IDENTIFIER).expect("Failed to convert OID"),
+            parameters: None,
+        },
+        private_key: &private_key,
+        public_key: None,
+    };
+    let key_pkcs8_der = key_pkcs8
+        .to_der()
+        .expect("Failed to convert keypair to DER")
+        .to_der();
+
+    let rcgen_keypair = rcgen::KeyPair::from_der(&key_pkcs8_der)?;
+
+    let mut cert_params = CertificateParams::default();
+    cert_params.subject_alt_names = vec![SanType::IpAddress(san)];
+    cert_params.alg = &rcgen::PKCS_ED25519;
+    cert_params.key_pair = Some(rcgen_keypair);
+    cert_params.distinguished_name = DistinguishedName::new();
+    cert_params
+        .distinguished_name
+        .push(DnType::CommonName, "Solana node");
+
+    let cert = rcgen::Certificate::from_params(cert_params)?;
+    let cert_der = cert.serialize_der().unwrap();
+    let priv_key = cert.serialize_private_key_der();
+    let priv_key = rustls::PrivateKey(priv_key);
+    Ok((rustls::Certificate(cert_der), priv_key))
+}
 
 pub async fn load_identity_keypair(identity_file: &String) -> Option<Keypair> {
     let identity_file = tokio::fs::read_to_string(identity_file.as_str())

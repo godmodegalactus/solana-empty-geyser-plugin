@@ -8,3 +8,8 @@ members = [
 debug = true
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+solana-geyser-plugin-interface = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.17" }
+solana-sdk = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.17" }
+solana-streamer = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.17" }

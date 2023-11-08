@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::SystemTime};
 
-use rustls::{DistinguishedNames, server::ClientCertVerified, Certificate};
+use rustls::{server::ClientCertVerified, Certificate, DistinguishedNames};
 
 pub struct SkipClientVerification;
 

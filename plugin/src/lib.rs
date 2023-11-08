@@ -1,12 +1,29 @@
-use std::{net::{IpAddr, Ipv4Addr, UdpSocket}, sync::Arc, str::FromStr};
+use std::{
+    net::{IpAddr, Ipv4Addr, UdpSocket},
+    str::FromStr,
+    sync::Arc,
+};
 
+use itertools::Itertools;
 use pem::Pem;
-use quinn::{ServerConfig, IdleTimeout, Endpoint, TokioRuntime, EndpointConfig};
-use serde::{Serialize, Deserialize};
-use solana_geyser_plugin_interface::geyser_plugin_interface::{GeyserPlugin, Result as PluginResult, GeyserPluginError};
-use solana_sdk::{signature::{Signature, Keypair}, transaction::{TransactionError, SanitizedTransaction}, slot_history::Slot, quic::QUIC_MAX_TIMEOUT, packet::PACKET_DATA_SIZE, pubkey::Pubkey};
-use solana_streamer::{tls_certificates::{new_self_signed_tls_certificate, get_pubkey_from_tls_certificate}, quic::QuicServerError};
-use tokio::{runtime::Runtime, task::JoinHandle, sync::mpsc::UnboundedSender};
+use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime};
+use serde::{Deserialize, Serialize};
+use solana_geyser_plugin_interface::geyser_plugin_interface::{
+    GeyserPlugin, GeyserPluginError, Result as PluginResult,
+};
+use solana_sdk::{
+    packet::PACKET_DATA_SIZE,
+    pubkey::Pubkey,
+    quic::QUIC_MAX_TIMEOUT,
+    signature::{Keypair, Signature},
+    slot_history::Slot,
+    transaction::{SanitizedTransaction, TransactionError}, compute_budget::{self, ComputeBudgetInstruction}, borsh0_10::try_from_slice_unchecked,
+};
+use solana_streamer::{
+    quic::QuicServerError,
+    tls_certificates::{get_pubkey_from_tls_certificate, new_self_signed_tls_certificate},
+};
+use tokio::{runtime::Runtime, sync::mpsc::UnboundedSender, task::JoinHandle};
 
 use crate::skip_client_verification::SkipClientVerification;
 
@@ -16,9 +33,42 @@ pub const ALPN_GEYSER_PROTOCOL_ID: &[u8] = b"solana-geyser";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransactionResults {
-    signature: Signature,
-    error: Option<TransactionError>,
-    slot: Slot,
+    pub signature: Signature,
+    pub error: Option<TransactionError>,
+    pub slot: Slot,
+    pub writable_accounts: Vec<Pubkey>,
+    pub readable_accounts: Vec<Pubkey>,
+    pub cu_requested: u64,
+    pub prioritization_fees : u64,
+}
+
+fn decode_cu_requested_and_prioritization_fees(transaction: &SanitizedTransaction,) -> (u64, u64) {
+    let mut cu_requested:u64 = 200_000;
+    let mut prioritization_fees: u64 = 0;
+    let accounts = transaction.message().account_keys().iter().map(|x| *x).collect_vec();
+    for ix in transaction.message().instructions() {
+        if ix.program_id(accounts.as_slice())
+                    .eq(&compute_budget::id())
+        {
+            let cb_ix = try_from_slice_unchecked::<ComputeBudgetInstruction>(ix.data.as_slice());
+            if let Ok(ComputeBudgetInstruction::RequestUnitsDeprecated {
+                units,
+                additional_fee,
+            }) = cb_ix
+            {
+                if additional_fee > 0 {
+                    return (units as u64, ((units * 1000) / additional_fee) as u64);
+                } else {
+                    return (units as u64, 0);
+                }
+            } else if let Ok(ComputeBudgetInstruction::SetComputeUnitLimit(units)) = cb_ix {
+                cu_requested = units as u64;
+            } else if let Ok(ComputeBudgetInstruction::SetComputeUnitPrice(price)) = cb_ix {
+                prioritization_fees = price;
+            }
+        }
+    }
+    (cu_requested, prioritization_fees)
 }
 
 #[derive(Debug)]
@@ -50,7 +100,28 @@ impl GeyserPlugin for Plugin {
         slot: Slot,
     ) -> PluginResult<()> {
         if let Some(inner) = &self.inner {
-            if let Err(e) = inner.sender.send(TransactionResults { signature: transaction.signature().clone(), error, slot }) {
+            let message = transaction.message();
+
+            let accounts = message.account_keys();
+            let is_writable = accounts.iter().enumerate().map(|(index, _)| {
+                transaction.message().is_writable(index)
+            }).collect_vec();
+            let mut writable_accounts = is_writable.iter().enumerate().filter(|(_, v)| **v).map(|(index, get_mut)| accounts[index]).collect_vec();
+            let mut readable_accounts = is_writable.iter().enumerate().filter(|(_, v)| !**v).map(|(index, get_mut)| accounts[index]).collect_vec();
+            writable_accounts.truncate(32);
+            readable_accounts.truncate(32);
+
+            let (cu_requested, prioritization_fees) = decode_cu_requested_and_prioritization_fees(transaction);
+
+            if let Err(e) = inner.sender.send(TransactionResults {
+                signature: transaction.signature().clone(),
+                error,
+                slot,
+                writable_accounts,
+                readable_accounts,
+                cu_requested,
+                prioritization_fees,
+            }) {
                 log::error!("error sending on the channel {}", e);
             }
             Ok(())
@@ -59,17 +130,21 @@ impl GeyserPlugin for Plugin {
         }
     }
 
-    fn on_load(&mut self, _config_file: &str) -> solana_geyser_plugin_interface::geyser_plugin_interface::Result<()> {
+    fn on_load(
+        &mut self,
+        _config_file: &str,
+    ) -> solana_geyser_plugin_interface::geyser_plugin_interface::Result<()> {
         let runtime = Runtime::new().map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
-        let res  = configure_server(&Keypair::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
-        
+        let res = configure_server(&Keypair::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+
         let (config, _) = res.map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let sock = UdpSocket::bind("127.0.0.1:18990").expect("couldn't bind to address");
         let endpoint = Endpoint::new(EndpointConfig::default(), Some(config), sock, TokioRuntime)
-        .map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
+            .map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let (sender, reciever) = tokio::sync::mpsc::unbounded_channel::<TransactionResults>();
 
-        let allowed_connection = Pubkey::from_str("G8pLuvzarejjLuuPNVNR1gk9xiFKmAcs9J5LL3GZGM6F").unwrap();
+        let allowed_connection =
+            Pubkey::from_str("G8pLuvzarejjLuuPNVNR1gk9xiFKmAcs9J5LL3GZGM6F").unwrap();
 
         let handle = tokio::spawn(async move {
             let mut reciever = reciever;

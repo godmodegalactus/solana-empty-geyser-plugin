@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::SystemTime};
 
-use rustls::{server::ClientCertVerified, Certificate, DistinguishedNames};
+use rustls::{server::ClientCertVerified, Certificate, DistinguishedName};
 
 pub struct SkipClientVerification;
 
@@ -11,8 +11,8 @@ impl SkipClientVerification {
 }
 
 impl rustls::server::ClientCertVerifier for SkipClientVerification {
-    fn client_auth_root_subjects(&self) -> Option<DistinguishedNames> {
-        Some(DistinguishedNames::new())
+    fn client_auth_root_subjects(&self) -> &[DistinguishedName] {
+        &[]
     }
 
     fn verify_client_cert(

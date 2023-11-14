@@ -1,10 +1,10 @@
 use std::{
     net::{IpAddr, Ipv4Addr, UdpSocket},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
-use crate::config::Config;
+use crate::{config::Config, tls_certificate::new_self_signed_tls_certificate};
 use itertools::Itertools;
 use pem::Pem;
 use quinn::{Endpoint, EndpointConfig, IdleTimeout, ServerConfig, TokioRuntime};
@@ -20,16 +20,14 @@ use solana_sdk::{
     slot_history::Slot,
     transaction::{SanitizedTransaction, TransactionError}, compute_budget::{self, ComputeBudgetInstruction}, borsh0_10::try_from_slice_unchecked,
 };
-use solana_streamer::{
-    quic::QuicServerError,
-    tls_certificates::{get_pubkey_from_tls_certificate, new_self_signed_tls_certificate},
-};
+use tls_certificate::get_pubkey_from_tls_certificate;
 use tokio::{runtime::Runtime, sync::mpsc::UnboundedSender, task::JoinHandle};
 
 use crate::skip_client_verification::SkipClientVerification;
 
 pub mod skip_client_verification;
 pub mod config;
+pub mod tls_certificate;
 
 pub const ALPN_GEYSER_PROTOCOL_ID: &[u8] = b"solana-geyser";
 
@@ -78,9 +76,10 @@ pub struct PluginInner {
     pub runtime: Runtime,
     pub handle: JoinHandle<()>,
     pub sender: Arc<UnboundedSender<TransactionResults>>,
+    pub start_sending: Arc<AtomicBool>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Plugin {
     inner: Option<PluginInner>,
 }
@@ -102,6 +101,12 @@ impl GeyserPlugin for Plugin {
         slot: Slot,
     ) -> PluginResult<()> {
         if let Some(inner) = &self.inner {
+            if !inner.start_sending.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(())
+            }
+            if transaction.is_simple_vote_transaction() {
+                return Ok(())
+            }
             let message = transaction.message();
 
             let accounts = message.account_keys();
@@ -124,7 +129,7 @@ impl GeyserPlugin for Plugin {
                 cu_requested,
                 prioritization_fees,
             }) {
-                log::error!("error sending on the channel {}", e);
+                log::error!("error sending on the channel {e:?}");
             }
             Ok(())
         } else {
@@ -140,61 +145,68 @@ impl GeyserPlugin for Plugin {
         let runtime = Runtime::new().map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
         let res = configure_server(&Keypair::new(), IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
 
-        let (config, _) = res.map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
+        let (config, _) = res.map_err(|_| GeyserPluginError::TransactionUpdateError { msg: "error configuring server".to_string() })?;
         let sock = UdpSocket::bind(plugin_config.quic_plugin.address).expect("couldn't bind to address");
-        let endpoint = Endpoint::new(EndpointConfig::default(), Some(config), sock, TokioRuntime)
-            .map_err(|error| GeyserPluginError::Custom(Box::new(error)))?;
+        
         let (sender, reciever) = tokio::sync::mpsc::unbounded_channel::<TransactionResults>();
 
         let allowed_connection =
             Pubkey::from_str("G8pLuvzarejjLuuPNVNR1gk9xiFKmAcs9J5LL3GZGM6F").unwrap();
+        let start_sending = Arc::new(AtomicBool::new(false));
+        let start_sending_cp = start_sending.clone();
 
-        let handle = tokio::spawn(async move {
+        let handle = runtime.block_on(async move {
             let mut reciever = reciever;
-            loop {
-                let connecting = endpoint.accept().await;
-                if let Some(connecting) = connecting {
-                    let connected = connecting.await;
-                    let connection = match connected {
-                        Ok(connection) => connection,
-                        Err(e) => {
-                            log::error!("geyser plugin connecting {} error", e);
+            let endpoint = Endpoint::new(EndpointConfig::default(), Some(config), sock, Arc::new(TokioRuntime)).expect("Should be able to create endpoint");
+            tokio::spawn(async move {
+                loop {
+                    let connecting = endpoint.accept().await;
+                    if let Some(connecting) = connecting {
+                        let connected = connecting.await;
+                        let connection = match connected {
+                            Ok(connection) => connection,
+                            Err(e) => {
+                                log::error!("geyser plugin connecting {} error", e);
+                                continue;
+                            }
+                        };
+                        let connection_identity = get_remote_pubkey(&connection);
+                        if let Some(connection_identity) = connection_identity {
+                            if !allowed_connection.eq(&connection_identity) {
+                                // not an authorized connection
+                                continue;
+                            }
+                        } else {
                             continue;
                         }
-                    };
-                    let connection_identity = get_remote_pubkey(&connection);
-                    if let Some(connection_identity) = connection_identity {
-                        if !allowed_connection.eq(&connection_identity) {
-                            // not an authorized connection
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                    let (mut send_stream, _) = match connection.accept_bi().await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            log::error!("geyser plugin accepting bi-channel {} error", e);
-                            continue;
-                        }
-                    };
+                        let (mut send_stream, _) = match connection.accept_bi().await {
+                            Ok(res) => res,
+                            Err(e) => {
+                                log::error!("geyser plugin accepting bi-channel {} error", e);
+                                continue;
+                            }
+                        };
 
-                    while let Some(msg) = reciever.recv().await {
-                        let bytes = bincode::serialize(&msg).unwrap_or(vec![]);
-                        if !bytes.is_empty() {
-                            if let Err(e) = send_stream.write_all(&bytes).await {
-                                log::error!("error writing on stream channel {}", e);
+                        start_sending_cp.store(true, std::sync::atomic::Ordering::Relaxed);
+                        while let Some(msg) = reciever.recv().await {
+                            let bytes = bincode::serialize(&msg).unwrap_or(vec![]);
+                            if !bytes.is_empty() {
+                                if let Err(e) = send_stream.write_all(&bytes).await {
+                                    log::error!("error writing on stream channel {}", e);
+                                }
                             }
                         }
+                        start_sending_cp.store(false, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-            }
+            })
         });
 
         self.inner = Some(PluginInner {
             runtime,
             handle,
             sender: Arc::new(sender),
+            start_sending,
         });
         Ok(())
     }
@@ -205,7 +217,7 @@ impl GeyserPlugin for Plugin {
 pub(crate) fn configure_server(
     identity_keypair: &Keypair,
     host: IpAddr,
-) -> Result<(ServerConfig, String), QuicServerError> {
+) -> anyhow::Result<(ServerConfig, String)> {
     let (cert, priv_key) = new_self_signed_tls_certificate(identity_keypair, host)?;
     let cert_chain_pem_parts = vec![Pem {
         tag: "CERTIFICATE".to_string(),
@@ -223,15 +235,15 @@ pub(crate) fn configure_server(
     server_config.use_retry(true);
     let config = Arc::get_mut(&mut server_config.transport).unwrap();
 
-    config.max_concurrent_uni_streams((0 as u32).into());
-    let recv_size = (PACKET_DATA_SIZE as u32).into();
+    config.max_concurrent_uni_streams((1 as u32).into());
+    let recv_size = (PACKET_DATA_SIZE as u32 * 100).into();
     config.stream_receive_window(recv_size);
     config.receive_window(recv_size);
     let timeout = IdleTimeout::try_from(QUIC_MAX_TIMEOUT).unwrap();
     config.max_idle_timeout(Some(timeout));
 
     // disable bidi & datagrams
-    const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1;
+    const MAX_CONCURRENT_BIDI_STREAMS: u32 = 10;
     config.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
     config.datagram_receive_buffer_size(None);
 
@@ -247,4 +259,12 @@ pub fn get_remote_pubkey(connection: &quinn::Connection) -> Option<Pubkey> {
         .filter(|certs| certs.len() == 1)?
         .first()
         .and_then(get_pubkey_from_tls_certificate)
+}
+
+#[no_mangle]
+#[allow(improper_ctypes_definitions)]
+pub unsafe extern "C" fn _create_plugin() -> *mut dyn GeyserPlugin {
+    let plugin = Plugin::default();
+    let plugin: Box<dyn GeyserPlugin> = Box::new(plugin);
+    Box::into_raw(plugin)
 }

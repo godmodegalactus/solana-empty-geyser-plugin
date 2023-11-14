@@ -1,13 +1,4 @@
-use std::sync::Arc;
-
-
 pub struct SkipServerVerification;
-
-impl SkipServerVerification {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self)
-    }
-}
 
 impl rustls::client::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(

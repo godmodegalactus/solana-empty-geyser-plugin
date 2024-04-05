@@ -1,7 +1,6 @@
 [workspace]
 members = [
-    "plugin",
-    "client"
+    "plugin"
 ]
 
 [profile.release]
@@ -9,7 +8,10 @@ debug = true
 lto = true
 codegen-units = 1
 
-[patch.crates-io]
-solana-geyser-plugin-interface = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
-solana-sdk = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
-solana-streamer = { git = "https://github.com/blockworks-foundation/solana.git", branch = "geyser_send_transaction_results_v1.16.18" }
+[workspace.dependencies]
+solana-geyser-plugin-interface = "1.17.28"
+solana-sdk = "1.17.28"
+solana-streamer = "1.17.28"
+solana-quic-client = "1.17.28"
+solana-net-utils = "1.17.28"
+solana-connection-cache = "1.17.28"

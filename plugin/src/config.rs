@@ -1,22 +1,15 @@
-use std::{net::SocketAddr, fs::read_to_string, path::Path};
+use std::{fs::read_to_string, path::Path};
 
 use serde::Deserialize;
 use solana_geyser_plugin_interface::geyser_plugin_interface::GeyserPluginError;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
-    pub libpath: String,
-    pub quic_plugin: ConfigQuicPlugin,
-}
-
+pub struct Config {}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ConfigQuicPlugin {
-    /// Address of Grpc service.
-    pub address: SocketAddr,
-}
+pub struct ConfigQuicPlugin {}
 
 impl Config {
     fn load_from_str(config: &str) -> std::result::Result<Self, GeyserPluginError> {

@@ -15,7 +15,6 @@ impl GeyserPlugin for Plugin {
     fn on_load(
         &mut self,
         _config_file: &str,
-        _: bool,
     ) -> solana_geyser_plugin_interface::geyser_plugin_interface::Result<()> {
         Ok(())
     }

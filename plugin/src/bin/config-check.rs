@@ -9,8 +9,5 @@ struct Args {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-    let _config = Config::load_from_file(args.config)?;
-    println!("Config is OK!");
     Ok(())
 }

@@ -20,6 +20,10 @@ impl GeyserPlugin for Plugin {
     }
 
     fn on_unload(&mut self) {}
+
+    fn account_data_notifications_enabled(&self) -> bool {
+        false
+    }
 }
 
 #[no_mangle]

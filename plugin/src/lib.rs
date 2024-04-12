@@ -22,7 +22,15 @@ impl GeyserPlugin for Plugin {
     fn on_unload(&mut self) {}
 
     fn account_data_notifications_enabled(&self) -> bool {
-        false
+        true
+    }
+
+    fn transaction_notifications_enabled(&self) -> bool {
+        true
+    }
+
+    fn entry_notifications_enabled(&self) -> bool {
+        true
     }
 }
 
